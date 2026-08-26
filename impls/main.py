@@ -16,6 +16,7 @@ from utils.env_utils import make_env_and_datasets
 from utils.evaluation import evaluate
 from utils.flax_utils import restore_agent, save_agent
 from utils.log_utils import CsvLogger, get_exp_name, get_flag_dict, get_wandb_video, setup_wandb
+from utils.nwm_data import load_nwm_dataset
 
 FLAGS = flags.FLAGS
 
@@ -25,6 +26,10 @@ flags.DEFINE_string('env_name', 'antmaze-large-navigate-v0', 'Environment (datas
 flags.DEFINE_string('save_dir', 'exp/', 'Save directory.')
 flags.DEFINE_string('restore_path', None, 'Restore path.')
 flags.DEFINE_integer('restore_epoch', None, 'Restore epoch.')
+
+flags.DEFINE_string('nwm_train_dir', None, 'nwm memmap train dataset directory (offline-only; skips env creation).')
+flags.DEFINE_string('nwm_val_dir', None, 'nwm memmap validation dataset directory.')
+flags.DEFINE_string('run_name', None, 'Weights & Biases run name (defaults to the generated experiment name).')
 
 flags.DEFINE_integer('train_steps', 1000000, 'Number of training steps.')
 flags.DEFINE_integer('log_interval', 5000, 'Logging interval.')
@@ -43,11 +48,23 @@ config_flags.DEFINE_config_file('agent', 'agents/gciql.py', lock_config=False)
 
 
 def main(_):
+    use_nwm = FLAGS.nwm_train_dir is not None
+
     # Set up logger.
     exp_name = get_exp_name(FLAGS.seed)
-    setup_wandb(project='OGBench', group=FLAGS.run_group, name=exp_name)
+    if use_nwm:
+        assert FLAGS.eval_interval == 0, 'nwm runs are offline-only; pass --eval_interval=0 (eval is a separate job)'
+        setup_wandb(
+            project='nwm-policy',
+            group=FLAGS.run_group,
+            name=FLAGS.run_name or exp_name,
+            job_type='orl',
+            tags=['orl', 'ogbench-impls'],
+        )
+    else:
+        setup_wandb(project='OGBench', group=FLAGS.run_group, name=exp_name)
+        FLAGS.save_dir = os.path.join(FLAGS.save_dir, wandb.run.project, FLAGS.run_group, exp_name)
 
-    FLAGS.save_dir = os.path.join(FLAGS.save_dir, wandb.run.project, FLAGS.run_group, exp_name)
     os.makedirs(FLAGS.save_dir, exist_ok=True)
     flag_dict = get_flag_dict()
     with open(os.path.join(FLAGS.save_dir, 'flags.json'), 'w') as f:
@@ -55,7 +72,12 @@ def main(_):
 
     # Set up environment and dataset.
     config = FLAGS.agent
-    env, train_dataset, val_dataset = make_env_and_datasets(FLAGS.env_name, frame_stack=config['frame_stack'])
+    if use_nwm:
+        assert config['frame_stack'] is None, 'frame stacking is not supported for nwm exports'
+        env = None
+        train_dataset, val_dataset = load_nwm_dataset(FLAGS.nwm_train_dir, FLAGS.nwm_val_dir)
+    else:
+        env, train_dataset, val_dataset = make_env_and_datasets(FLAGS.env_name, frame_stack=config['frame_stack'])
 
     dataset_class = {
         'GCDataset': GCDataset,
@@ -70,7 +92,7 @@ def main(_):
     np.random.seed(FLAGS.seed)
 
     example_batch = train_dataset.sample(1)
-    if config['discrete']:
+    if config['discrete'] and env is not None:
         # Fill with the maximum action to let the agent know the action space size.
         example_batch['actions'] = np.full_like(example_batch['actions'], env.action_space.n - 1)
 
@@ -110,7 +132,7 @@ def main(_):
             train_logger.log(train_metrics, step=i)
 
         # Evaluate agent.
-        if i == 1 or i % FLAGS.eval_interval == 0:
+        if FLAGS.eval_interval > 0 and (i == 1 or i % FLAGS.eval_interval == 0):
             if FLAGS.eval_on_cpu:
                 eval_agent = jax.device_put(agent, device=jax.devices('cpu')[0])
             else:

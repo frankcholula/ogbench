@@ -64,18 +64,24 @@ def setup_wandb(
     project='project',
     group=None,
     name=None,
-    mode='online',
+    mode=None,
+    job_type=None,
+    tags=None,
 ):
     """Set up Weights & Biases for logging."""
     wandb_output_dir = tempfile.mkdtemp()
-    tags = [group] if group is not None else None
+    mode = mode or os.environ.get('WANDB_MODE', 'online')  # an explicit mode= would otherwise shadow WANDB_MODE
+    tags = list(tags) if tags else []
+    if group is not None:
+        tags.append(group)
 
     init_kwargs = dict(
         config=get_flag_dict(),
         project=project,
         entity=entity,
-        tags=tags,
+        tags=tags or None,
         group=group,
+        job_type=job_type,
         dir=wandb_output_dir,
         name=name,
         settings=wandb.Settings(

@@ -100,6 +100,50 @@ class ImpalaEncoder(nn.Module):
         return out
 
 
+class TokenPooler(nn.Module):
+    """Attention pooler over gaussian-token sets (mirror of the nwm torch pooler).
+
+    Accepts either a single token set (last dim `token_dim`) or GCEncoder's channel-concatenated obs+goal pair
+    (last dim `2 * token_dim`), which is split back into two sets, tagged with a type embedding, and pooled jointly.
+
+    Attributes:
+        token_dim: Per-token feature width of one set.
+        d_model: Width of the shared projection and of the attention.
+        num_queries: Number of learned pooling queries.
+        num_heads: Number of attention heads.
+        out_dim: Output width.
+    """
+
+    token_dim: int = 14
+    d_model: int = 128
+    num_queries: int = 8
+    num_heads: int = 4
+    out_dim: int = 512
+
+    @nn.compact
+    def __call__(self, x, train=True, cond_var=None):
+        num_sets, rem = divmod(x.shape[-1], self.token_dim)
+        assert rem == 0 and num_sets in (1, 2), f'expected 1 or 2 sets of {self.token_dim} channels, got {x.shape[-1]}'
+        x = x.astype(jnp.float32)
+
+        proj = nn.Dense(self.d_model, name='proj')
+        type_emb = self.param('type_emb', nn.initializers.normal(0.02), (2, self.d_model))
+        sets = [proj(x[..., i * self.token_dim : (i + 1) * self.token_dim]) + type_emb[i] for i in range(num_sets)]
+        kv = nn.LayerNorm(name='kv_norm')(jnp.concatenate(sets, axis=-2))
+
+        queries = self.param('queries', nn.initializers.normal(0.02), (self.num_queries, self.d_model))
+        queries = jnp.broadcast_to(queries, (*kv.shape[:-2], self.num_queries, self.d_model))
+        out = nn.MultiHeadDotProductAttention(
+            num_heads=self.num_heads,
+            qkv_features=self.d_model,
+            out_features=self.d_model,
+            name='attn',
+        )(queries, kv)
+
+        out = out.reshape((*out.shape[:-2], self.num_queries * self.d_model))
+        return nn.gelu(nn.Dense(self.out_dim, name='out')(out))
+
+
 class GCEncoder(nn.Module):
     """Helper module to handle inputs to goal-conditioned networks.
 
@@ -141,4 +185,7 @@ encoder_modules = {
     'impala_debug': functools.partial(ImpalaEncoder, num_blocks=1, stack_sizes=(4, 4)),
     'impala_small': functools.partial(ImpalaEncoder, num_blocks=1),
     'impala_large': functools.partial(ImpalaEncoder, stack_sizes=(64, 128, 128), mlp_hidden_dims=(1024,)),
+    # Token modality: GCDataset.augment only touches ndim==4 arrays, so token batches skip random cropping anyway;
+    # still run these with --agent.p_aug=0.0 so the augmentation branch never fires.
+    'token_pooler': TokenPooler,
 }
