@@ -104,16 +104,20 @@ def main(_):
         config,
     )
 
-    # Restore agent.
+    # Restore agent. nwm runs continue the step count (preemption resume); sampling RNG is re-seeded past the restart.
+    start_step = 1
     if FLAGS.restore_path is not None:
         agent = restore_agent(agent, FLAGS.restore_path, FLAGS.restore_epoch)
+        if use_nwm:
+            start_step = FLAGS.restore_epoch + 1
+            np.random.seed(FLAGS.seed + FLAGS.restore_epoch)
 
     # Train agent.
     train_logger = CsvLogger(os.path.join(FLAGS.save_dir, 'train.csv'))
     eval_logger = CsvLogger(os.path.join(FLAGS.save_dir, 'eval.csv'))
     first_time = time.time()
     last_time = time.time()
-    for i in tqdm.tqdm(range(1, FLAGS.train_steps + 1), smoothing=0.1, dynamic_ncols=True):
+    for i in tqdm.tqdm(range(start_step, FLAGS.train_steps + 1), smoothing=0.1, dynamic_ncols=True):
         # Update agent.
         batch = train_dataset.sample(config['batch_size'])
         agent, update_info = agent.update(batch)

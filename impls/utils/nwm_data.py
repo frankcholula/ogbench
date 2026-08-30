@@ -13,8 +13,11 @@ def _load_split(path):
     for f in FILES:
         assert os.path.exists(os.path.join(path, f)), f'missing {f} in {path}'
 
-    observations = np.load(os.path.join(path, 'observations.npy'), mmap_mode='r')
-    actions = np.load(os.path.join(path, 'actions.npy'), mmap_mode='r')
+    # NWM_MEMMAP=0 reads the arrays into RAM: random memmap reads over a network filesystem (cluster) run ~10x
+    # slower than the update step; the tok train split is ~11 GB, so budget the job memory accordingly.
+    mmap = None if os.environ.get('NWM_MEMMAP', '1') == '0' else 'r'
+    observations = np.load(os.path.join(path, 'observations.npy'), mmap_mode=mmap)
+    actions = np.load(os.path.join(path, 'actions.npy'), mmap_mode=mmap)
     terminals = np.load(os.path.join(path, 'terminals.npy')).astype(np.float32)
 
     assert len(observations) == len(actions) == len(terminals), 'length mismatch across arrays'
